@@ -205,3 +205,15 @@ function up() {
 }
 
 up();
+
+// Ensure 'deleted' column exists on cars for soft-delete semantics
+try {
+  const info = db.prepare("PRAGMA table_info(cars)").all();
+  const hasDeleted = info.some((c) => String(c.name).toLowerCase() === 'deleted');
+  if (!hasDeleted) {
+    db.exec("ALTER TABLE cars ADD COLUMN deleted INTEGER DEFAULT 0");
+    console.log("Added 'deleted' column to cars table");
+  }
+} catch (e) {
+  console.warn('Could not add deleted column on cars:', e?.message || e);
+}

@@ -48,7 +48,7 @@ function toCarWithHost(row) {
 }
 
 router.get('/', (req, res) => {
-  const rows = db.prepare('SELECT * FROM cars ORDER BY id DESC').all();
+  const rows = db.prepare('SELECT * FROM cars WHERE (deleted IS NULL OR deleted = 0) ORDER BY id DESC').all();
   return res.json(rows.map(toCar));
 });
 
@@ -71,7 +71,8 @@ router.get('/availability', (req, res) => {
         ELSE 1
       END AS available_for_range
     FROM cars c
-    ${city ? 'WHERE c.city = ?' : ''}
+    WHERE (c.deleted IS NULL OR c.deleted = 0)
+    ${city ? ' AND c.city = ?' : ''}
   `;
   const rows = city
     ? db.prepare(sql).all(pickup, ret, city)
@@ -85,6 +86,7 @@ router.get('/admin', requireAdmin, (req, res) => {
     SELECT c.*, u.email AS host_email, u.full_name AS host_full_name, u.mobile AS host_mobile
     FROM cars c
     LEFT JOIN users u ON u.id = c.host_id
+    WHERE (c.deleted IS NULL OR c.deleted = 0)
     ORDER BY c.id DESC
   `).all();
   return res.json(rows.map(toCarWithHost));
@@ -92,12 +94,12 @@ router.get('/admin', requireAdmin, (req, res) => {
 
 // User: get own hosted cars
 router.get('/mine', requireAuth, (req, res) => {
-  const rows = db.prepare('SELECT * FROM cars WHERE host_id = ? ORDER BY id DESC').all(req.user.id);
+  const rows = db.prepare('SELECT * FROM cars WHERE (deleted IS NULL OR deleted = 0) AND host_id = ? ORDER BY id DESC').all(req.user.id);
   return res.json(rows.map(toCar));
 });
 
 router.get('/:id', (req, res) => {
-  const row = db.prepare('SELECT * FROM cars WHERE id = ?').get(req.params.id);
+  const row = db.prepare('SELECT * FROM cars WHERE (deleted IS NULL OR deleted = 0) AND id = ?').get(req.params.id);
   if (!row) return res.status(404).json({ error: 'Not found' });
   return res.json(toCar(row));
 });
@@ -270,8 +272,8 @@ router.delete('/:id', requireAuth, (req, res) => {
   const isAdmin = req.user?.role === 'admin';
   const isOwner = row.host_id && Number(row.host_id) === Number(req.user.id);
   if (!isAdmin && !isOwner) return res.status(403).json({ error: 'Forbidden' });
-  db.prepare('DELETE FROM cars WHERE id = ?').run(row.id);
-  return res.json({ ok: true });
+  db.prepare('UPDATE cars SET deleted = 1 WHERE id = ?').run(row.id);
+  return res.json({ ok: true, softDeleted: true });
 });
 
 export default router;
