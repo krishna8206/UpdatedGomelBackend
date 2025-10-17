@@ -2,8 +2,13 @@ import express from 'express';
 import db from '../db/index.js';
 import { body, validationResult } from 'express-validator';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { ensureDir, saveDataUrl } from '../utils/files.js';
 
 const router = express.Router();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 function toCar(row) {
   return {
@@ -114,6 +119,7 @@ router.post(
       rating = 0,
       seats = 5,
       image,
+      imageData,
       city,
       brand,
       description,
@@ -138,7 +144,25 @@ router.post(
       available ? 1 : 0,
       hostId
     );
-    const row = db.prepare('SELECT * FROM cars WHERE id = ?').get(info.lastInsertRowid);
+    let row = db.prepare('SELECT * FROM cars WHERE id = ?').get(info.lastInsertRowid);
+
+    // If imageData provided, save to uploads and update image path
+    if (imageData && typeof imageData === 'string' && imageData.startsWith('data:')) {
+      try {
+        const carsDir = path.join(__dirname, '../../uploads/cars');
+        ensureDir(carsDir);
+        const targetPath = path.join(carsDir, `${row.id}.png`);
+        const saved = saveDataUrl(imageData, targetPath);
+        if (saved) {
+          const rel = path
+            .relative(path.join(__dirname, '../../'), saved)
+            .replace(/\\/g, '/');
+          db.prepare('UPDATE cars SET image = ? WHERE id = ?').run(rel, row.id);
+          row = db.prepare('SELECT * FROM cars WHERE id = ?').get(row.id);
+        }
+      } catch (_) {}
+    }
+
     return res.status(201).json(toCar(row));
   }
 );
@@ -161,6 +185,7 @@ router.post(
       rating = 0,
       seats = 5,
       image,
+      imageData,
       city,
       brand,
       description,
@@ -184,7 +209,25 @@ router.post(
       available ? 1 : 0,
       req.user.id
     );
-    const row = db.prepare('SELECT * FROM cars WHERE id = ?').get(info.lastInsertRowid);
+    let row = db.prepare('SELECT * FROM cars WHERE id = ?').get(info.lastInsertRowid);
+
+    // Save uploaded image if provided as data URL
+    if (imageData && typeof imageData === 'string' && imageData.startsWith('data:')) {
+      try {
+        const carsDir = path.join(__dirname, '../../uploads/cars');
+        ensureDir(carsDir);
+        const targetPath = path.join(carsDir, `${row.id}.png`);
+        const saved = saveDataUrl(imageData, targetPath);
+        if (saved) {
+          const rel = path
+            .relative(path.join(__dirname, '../../'), saved)
+            .replace(/\\/g, '/');
+          db.prepare('UPDATE cars SET image = ? WHERE id = ?').run(rel, row.id);
+          row = db.prepare('SELECT * FROM cars WHERE id = ?').get(row.id);
+        }
+      } catch (_) {}
+    }
+
     return res.status(201).json(toCar(row));
   }
 );
