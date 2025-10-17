@@ -30,6 +30,15 @@ function toCar(row) {
   };
 }
 
+function normalizeImage(req, car) {
+  if (!car || !car.image) return car;
+  const img = String(car.image);
+  if (/^https?:\/\//i.test(img)) return car;
+  const rel = img.replace(/^\/?/, '');
+  const base = `${req.protocol}://${req.get('host')}`;
+  return { ...car, image: `${base}/${rel}` };
+}
+
 function toCarWithHost(row) {
   const base = toCar(row);
   return {
@@ -49,7 +58,8 @@ function toCarWithHost(row) {
 
 router.get('/', (req, res) => {
   const rows = db.prepare('SELECT * FROM cars WHERE (deleted IS NULL OR deleted = 0) ORDER BY id DESC').all();
-  return res.json(rows.map(toCar));
+  const list = rows.map(toCar).map(c => normalizeImage(req, c));
+  return res.json(list);
 });
 
 // Availability for a date range: returns [{ id, availableForRange }]
@@ -89,19 +99,21 @@ router.get('/admin', requireAdmin, (req, res) => {
     WHERE (c.deleted IS NULL OR c.deleted = 0)
     ORDER BY c.id DESC
   `).all();
-  return res.json(rows.map(toCarWithHost));
+  const list = rows.map(toCarWithHost).map(c => normalizeImage(req, c));
+  return res.json(list);
 });
 
 // User: get own hosted cars
 router.get('/mine', requireAuth, (req, res) => {
   const rows = db.prepare('SELECT * FROM cars WHERE (deleted IS NULL OR deleted = 0) AND host_id = ? ORDER BY id DESC').all(req.user.id);
-  return res.json(rows.map(toCar));
+  const list = rows.map(toCar).map(c => normalizeImage(req, c));
+  return res.json(list);
 });
 
 router.get('/:id', (req, res) => {
   const row = db.prepare('SELECT * FROM cars WHERE (deleted IS NULL OR deleted = 0) AND id = ?').get(req.params.id);
   if (!row) return res.status(404).json({ error: 'Not found' });
-  return res.json(toCar(row));
+  return res.json(normalizeImage(req, toCar(row)));
 });
 
 router.post(
@@ -165,7 +177,7 @@ router.post(
       } catch (_) {}
     }
 
-    return res.status(201).json(toCar(row));
+    return res.status(201).json(normalizeImage(req, toCar(row)));
   }
 );
 
@@ -261,7 +273,7 @@ router.put(
 
     db.prepare(`UPDATE cars SET name=@name, type=@type, fuel=@fuel, transmission=@transmission, price_per_day=@price_per_day, rating=@rating, seats=@seats, image=@image, city=@city, brand=@brand, description=@description, available=@available, host_id=@host_id WHERE id=${row.id}`).run(updated);
     const out = db.prepare('SELECT * FROM cars WHERE id = ?').get(row.id);
-    return res.json(toCar(out));
+    return res.json(normalizeImage(req, toCar(out)));
   }
 );
 
