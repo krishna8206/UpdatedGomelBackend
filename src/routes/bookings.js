@@ -7,6 +7,7 @@ import { fileURLToPath } from 'url';
 import { ensureDir, saveDataUrl } from '../utils/files.js';
 import fs from 'fs';
 import { broadcast } from '../utils/events.js';
+import { mirrorBookingToMongo, deleteBookingFromMongo, getMongoDb } from '../utils/mongo.js';
 
 const router = express.Router();
 
@@ -63,7 +64,31 @@ function toBookingFull(row) {
 }
 
 // User: list own bookings
-router.get('/me', requireAuth, (req, res) => {
+router.get('/me', requireAuth, async (req, res) => {
+  const mdb = await getMongoDb();
+  if (mdb) {
+    const docs = await mdb
+      .collection('bookings')
+      .find({ userId: req.user.id })
+      .sort({ sqliteId: -1 })
+      .toArray();
+    const list = docs.map((b) => ({
+      id: b.sqliteId,
+      userId: b.userId,
+      carId: b.carId,
+      pickupDate: b.pickupDate,
+      returnDate: b.returnDate,
+      pickupLocation: b.pickupLocation || null,
+      returnLocation: b.returnLocation || null,
+      verification: b.verification || null,
+      totalCost: b.totalCost || null,
+      days: b.days || null,
+      status: b.status || 'confirmed',
+      payment: b.payment || null,
+      createdAt: b.createdAt || null,
+    }));
+    return res.json(list);
+  }
   const rows = db
     .prepare('SELECT * FROM bookings WHERE user_id = ? ORDER BY id DESC')
     .all(req.user.id);
@@ -71,7 +96,42 @@ router.get('/me', requireAuth, (req, res) => {
 });
 
 // Host: list bookings for cars owned by the host
-router.get('/host', requireAuth, (req, res) => {
+router.get('/host', requireAuth, async (req, res) => {
+  const mdb = await getMongoDb();
+  if (mdb) {
+    const cars = await mdb.collection('cars').find({ hostId: req.user.id, $or: [ { deleted: { $exists: false } }, { deleted: false } ] }).project({ sqliteId: 1, name: 1, type: 1, fuel: 1, transmission: 1, pricePerDay: 1 }).toArray();
+    const carIds = new Set(cars.map(c => c.sqliteId));
+    if (carIds.size === 0) return res.json([]);
+    const bookings = await mdb.collection('bookings').find({ carId: { $in: Array.from(carIds) } }).sort({ sqliteId: -1 }).toArray();
+    const usersMap = new Map();
+    const userIds = Array.from(new Set(bookings.map(b => b.userId)));
+    if (userIds.length) {
+      const users = await mdb.collection('users').find({ sqliteId: { $in: userIds } }).project({ sqliteId: 1, email: 1, fullName: 1, mobile: 1 }).toArray();
+      users.forEach(u => usersMap.set(u.sqliteId, u));
+    }
+    const carsMap = new Map();
+    cars.forEach(c => carsMap.set(c.sqliteId, c));
+    const out = bookings.map(b => ({
+      id: b.sqliteId,
+      userId: b.userId,
+      carId: b.carId,
+      pickupDate: b.pickupDate,
+      returnDate: b.returnDate,
+      pickupLocation: b.pickupLocation || null,
+      returnLocation: b.returnLocation || null,
+      verification: b.verification || null,
+      totalCost: b.totalCost || null,
+      days: b.days || null,
+      status: b.status || 'confirmed',
+      payment: b.payment || null,
+      createdAt: b.createdAt || null,
+      user: usersMap.get(b.userId) ? { id: usersMap.get(b.userId).sqliteId, email: usersMap.get(b.userId).email, fullName: usersMap.get(b.userId).fullName || null, mobile: usersMap.get(b.userId).mobile || null } : null,
+      userEmail: usersMap.get(b.userId)?.email || null,
+      userFullName: usersMap.get(b.userId)?.fullName || null,
+      car: carsMap.get(b.carId) ? { id: b.carId, name: carsMap.get(b.carId).name, type: carsMap.get(b.carId).type, fuel: carsMap.get(b.carId).fuel, transmission: carsMap.get(b.carId).transmission, pricePerDay: carsMap.get(b.carId).pricePerDay } : null,
+    }));
+    return res.json(out);
+  }
   const rows = db.prepare(`
     SELECT b.*, 
            u.email AS user_email, u.full_name AS user_full_name, u.mobile AS user_mobile,
@@ -86,7 +146,41 @@ router.get('/host', requireAuth, (req, res) => {
 });
 
 // Admin: list all
-router.get('/', requireAdmin, (req, res) => {
+router.get('/', requireAdmin, async (req, res) => {
+  const mdb = await getMongoDb();
+  if (mdb) {
+    const bookings = await mdb.collection('bookings').find({}).sort({ sqliteId: -1 }).toArray();
+    const userIds = Array.from(new Set(bookings.map(b => b.userId)));
+    const carIds = Array.from(new Set(bookings.map(b => b.carId)));
+    const [users, cars] = await Promise.all([
+      userIds.length ? mdb.collection('users').find({ sqliteId: { $in: userIds } }).project({ sqliteId: 1, email: 1, fullName: 1, mobile: 1 }).toArray() : Promise.resolve([]),
+      carIds.length ? mdb.collection('cars').find({ sqliteId: { $in: carIds } }).project({ sqliteId: 1, name: 1, type: 1, fuel: 1, transmission: 1, pricePerDay: 1 }).toArray() : Promise.resolve([]),
+    ]);
+    const usersMap = new Map(users.map(u => [u.sqliteId, u]));
+    const carsMap = new Map(cars.map(c => [c.sqliteId, c]));
+    const out = bookings.map(b => ({
+      ...{
+        id: b.sqliteId,
+        userId: b.userId,
+        carId: b.carId,
+        pickupDate: b.pickupDate,
+        returnDate: b.returnDate,
+        pickupLocation: b.pickupLocation || null,
+        returnLocation: b.returnLocation || null,
+        verification: b.verification || null,
+        totalCost: b.totalCost || null,
+        days: b.days || null,
+        status: b.status || 'confirmed',
+        payment: b.payment || null,
+        createdAt: b.createdAt || null,
+      },
+      user: usersMap.get(b.userId) ? { id: usersMap.get(b.userId).sqliteId, email: usersMap.get(b.userId).email, fullName: usersMap.get(b.userId).fullName || null, mobile: usersMap.get(b.userId).mobile || null } : null,
+      userEmail: usersMap.get(b.userId)?.email || null,
+      userFullName: usersMap.get(b.userId)?.fullName || null,
+      car: carsMap.get(b.carId) ? { id: b.carId, name: carsMap.get(b.carId).name, type: carsMap.get(b.carId).type, fuel: carsMap.get(b.carId).fuel, transmission: carsMap.get(b.carId).transmission, pricePerDay: carsMap.get(b.carId).pricePerDay } : null,
+    }));
+    return res.json(out);
+  }
   const rows = db.prepare(`
     SELECT b.*, 
            u.email AS user_email, u.full_name AS user_full_name, u.mobile AS user_mobile,
@@ -100,7 +194,37 @@ router.get('/', requireAdmin, (req, res) => {
 });
 
 // Admin: get one
-router.get('/:id', requireAdmin, (req, res) => {
+router.get('/:id', requireAdmin, async (req, res) => {
+  const mdb = await getMongoDb();
+  const id = Number(req.params.id);
+  if (mdb) {
+    const b = await mdb.collection('bookings').findOne({ sqliteId: id });
+    if (!b) return res.status(404).json({ error: 'Not found' });
+    const [u, c] = await Promise.all([
+      mdb.collection('users').findOne({ sqliteId: b.userId }, { projection: { sqliteId: 1, email: 1, fullName: 1, mobile: 1 } }),
+      mdb.collection('cars').findOne({ sqliteId: b.carId }, { projection: { sqliteId: 1, name: 1, type: 1, fuel: 1, transmission: 1, pricePerDay: 1 } }),
+    ]);
+    const out = {
+      id: b.sqliteId,
+      userId: b.userId,
+      carId: b.carId,
+      pickupDate: b.pickupDate,
+      returnDate: b.returnDate,
+      pickupLocation: b.pickupLocation || null,
+      returnLocation: b.returnLocation || null,
+      verification: b.verification || null,
+      totalCost: b.totalCost || null,
+      days: b.days || null,
+      status: b.status || 'confirmed',
+      payment: b.payment || null,
+      createdAt: b.createdAt || null,
+      user: u ? { id: u.sqliteId, email: u.email, fullName: u.fullName || null, mobile: u.mobile || null } : null,
+      userEmail: u?.email || null,
+      userFullName: u?.fullName || null,
+      car: c ? { id: c.sqliteId, name: c.name, type: c.type, fuel: c.fuel, transmission: c.transmission, pricePerDay: c.pricePerDay } : null,
+    };
+    return res.json(out);
+  }
   const row = db.prepare(`
     SELECT b.*, 
            u.email AS user_email, u.full_name AS user_full_name, u.mobile AS user_mobile,
@@ -189,6 +313,7 @@ router.post(
     });
 
     const row = db.prepare('SELECT * FROM bookings WHERE id = ?').get(bookingId);
+    try { await mirrorBookingToMongo(row); } catch {}
     const out = toBooking(row);
     // Notify subscribers (admin/hosts) about new booking
     broadcast('booking_created', out);
@@ -197,7 +322,7 @@ router.post(
 );
 
 // Admin: delete booking
-router.delete('/:id', requireAdmin, (req, res) => {
+router.delete('/:id', requireAdmin, async (req, res) => {
   const row = db.prepare('SELECT * FROM bookings WHERE id = ?').get(req.params.id);
   if (!row) return res.status(404).json({ error: 'Not found' });
   // Do DB deletion in a transaction
@@ -206,6 +331,7 @@ router.delete('/:id', requireAdmin, (req, res) => {
     db.prepare('DELETE FROM bookings WHERE id = ?').run(id);
   });
   tx(row.id);
+  try { await deleteBookingFromMongo(row.id); } catch {}
 
   // Best-effort: remove uploaded files directory
   try {

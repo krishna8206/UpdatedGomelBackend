@@ -5,6 +5,7 @@ import { requireAdmin, requireAuth } from '../middleware/auth.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { ensureDir, saveDataUrl } from '../utils/files.js';
+import { mirrorCarToMongo, getMongoDb } from '../utils/mongo.js';
 
 const router = express.Router();
 const __filename = fileURLToPath(import.meta.url);
@@ -56,18 +57,65 @@ function toCarWithHost(row) {
   };
 }
 
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
+  const mdb = await getMongoDb();
+  if (mdb) {
+    const docs = await mdb
+      .collection('cars')
+      .find({ $or: [ { deleted: { $exists: false } }, { deleted: false } ] })
+      .sort({ sqliteId: -1 })
+      .toArray();
+    const list = docs.map((d) => ({
+      id: d.sqliteId,
+      name: d.name,
+      type: d.type,
+      fuel: d.fuel,
+      transmission: d.transmission,
+      pricePerDay: d.pricePerDay,
+      rating: d.rating,
+      seats: d.seats,
+      image: d.image,
+      city: d.city,
+      brand: d.brand,
+      description: d.description,
+      available: !!d.available,
+      hostId: d.hostId || null,
+      createdAt: d.createdAt || null,
+    })).map(c => normalizeImage(req, c));
+    return res.json(list);
+  }
   const rows = db.prepare('SELECT * FROM cars WHERE (deleted IS NULL OR deleted = 0) ORDER BY id DESC').all();
   const list = rows.map(toCar).map(c => normalizeImage(req, c));
   return res.json(list);
 });
 
 // Availability for a date range: returns [{ id, availableForRange }]
-router.get('/availability', (req, res) => {
+router.get('/availability', async (req, res) => {
   const { pickup, return: ret, city } = req.query;
   if (!pickup || !ret) return res.status(400).json({ error: 'pickup and return are required' });
 
-  // Evaluate overlap: booking overlaps if NOT (booking.end <= pickup OR booking.start >= return)
+  const mdb = await getMongoDb();
+  if (mdb) {
+    const carFilter = { $or: [ { deleted: { $exists: false } }, { deleted: false } ] };
+    if (city) carFilter.city = city;
+    const cars = await mdb.collection('cars').find(carFilter).project({ sqliteId: 1, available: 1 }).toArray();
+    const results = [];
+    for (const c of cars) {
+      let available = !!c.available;
+      if (available) {
+        const conflict = await mdb.collection('bookings').findOne({
+          carId: c.sqliteId,
+          $or: [ { status: { $exists: false } }, { status: { $ne: 'cancelled' } } ],
+          $nor: [ { returnDate: { $lte: pickup } }, { pickupDate: { $gte: ret } } ]
+        });
+        if (conflict) available = false;
+      }
+      results.push({ id: c.sqliteId, availableForRange: available });
+    }
+    return res.json(results);
+  }
+
+  // SQLite fallback
   const sql = `
     SELECT c.id,
       CASE
@@ -91,7 +139,41 @@ router.get('/availability', (req, res) => {
 });
 
 // Admin: list cars with host details
-router.get('/admin', requireAdmin, (req, res) => {
+router.get('/admin', requireAdmin, async (req, res) => {
+  const mdb = await getMongoDb();
+  if (mdb) {
+    const cars = await mdb
+      .collection('cars')
+      .find({ $or: [ { deleted: { $exists: false } }, { deleted: false } ] })
+      .sort({ sqliteId: -1 })
+      .toArray();
+    const list = [];
+    for (const c of cars) {
+      let host = null;
+      if (c.hostId) host = await mdb.collection('users').findOne({ sqliteId: c.hostId }, { projection: { email: 1, fullName: 1, mobile: 1, sqliteId: 1 } });
+      list.push(normalizeImage(req, {
+        id: c.sqliteId,
+        name: c.name,
+        type: c.type,
+        fuel: c.fuel,
+        transmission: c.transmission,
+        pricePerDay: c.pricePerDay,
+        rating: c.rating,
+        seats: c.seats,
+        image: c.image,
+        city: c.city,
+        brand: c.brand,
+        description: c.description,
+        available: !!c.available,
+        hostId: c.hostId || null,
+        createdAt: c.createdAt || null,
+        host: host ? { id: host.sqliteId, email: host.email, fullName: host.fullName || null, mobile: host.mobile || null } : null,
+        hostEmail: host?.email || null,
+        hostFullName: host?.fullName || null,
+      }));
+    }
+    return res.json(list);
+  }
   const rows = db.prepare(`
     SELECT c.*, u.email AS host_email, u.full_name AS host_full_name, u.mobile AS host_mobile
     FROM cars c
@@ -104,13 +186,62 @@ router.get('/admin', requireAdmin, (req, res) => {
 });
 
 // User: get own hosted cars
-router.get('/mine', requireAuth, (req, res) => {
+router.get('/mine', requireAuth, async (req, res) => {
+  const mdb = await getMongoDb();
+  if (mdb) {
+    const docs = await mdb
+      .collection('cars')
+      .find({ hostId: req.user.id, $or: [ { deleted: { $exists: false } }, { deleted: false } ] })
+      .sort({ sqliteId: -1 })
+      .toArray();
+    const list = docs.map((d) => ({
+      id: d.sqliteId,
+      name: d.name,
+      type: d.type,
+      fuel: d.fuel,
+      transmission: d.transmission,
+      pricePerDay: d.pricePerDay,
+      rating: d.rating,
+      seats: d.seats,
+      image: d.image,
+      city: d.city,
+      brand: d.brand,
+      description: d.description,
+      available: !!d.available,
+      hostId: d.hostId || null,
+      createdAt: d.createdAt || null,
+    })).map(c => normalizeImage(req, c));
+    return res.json(list);
+  }
   const rows = db.prepare('SELECT * FROM cars WHERE (deleted IS NULL OR deleted = 0) AND host_id = ? ORDER BY id DESC').all(req.user.id);
   const list = rows.map(toCar).map(c => normalizeImage(req, c));
   return res.json(list);
 });
 
-router.get('/:id', (req, res) => {
+router.get('/:id', async (req, res) => {
+  const mdb = await getMongoDb();
+  if (mdb) {
+    const d = await mdb.collection('cars').findOne({ sqliteId: Number(req.params.id), $or: [ { deleted: { $exists: false } }, { deleted: false } ] });
+    if (!d) return res.status(404).json({ error: 'Not found' });
+    const car = normalizeImage(req, {
+      id: d.sqliteId,
+      name: d.name,
+      type: d.type,
+      fuel: d.fuel,
+      transmission: d.transmission,
+      pricePerDay: d.pricePerDay,
+      rating: d.rating,
+      seats: d.seats,
+      image: d.image,
+      city: d.city,
+      brand: d.brand,
+      description: d.description,
+      available: !!d.available,
+      hostId: d.hostId || null,
+      createdAt: d.createdAt || null,
+    });
+    return res.json(car);
+  }
   const row = db.prepare('SELECT * FROM cars WHERE (deleted IS NULL OR deleted = 0) AND id = ?').get(req.params.id);
   if (!row) return res.status(404).json({ error: 'Not found' });
   return res.json(normalizeImage(req, toCar(row)));
@@ -159,6 +290,7 @@ router.post(
       hostId
     );
     let row = db.prepare('SELECT * FROM cars WHERE id = ?').get(info.lastInsertRowid);
+    try { await mirrorCarToMongo(row); } catch {}
 
     // If imageData provided, save to uploads and update image path
     if (imageData && typeof imageData === 'string' && imageData.startsWith('data:')) {
@@ -173,10 +305,12 @@ router.post(
             .replace(/\\/g, '/');
           db.prepare('UPDATE cars SET image = ? WHERE id = ?').run(rel, row.id);
           row = db.prepare('SELECT * FROM cars WHERE id = ?').get(row.id);
+          try { await mirrorCarToMongo(row); } catch {}
         }
       } catch (_) {}
     }
 
+    try { await mirrorCarToMongo(row); } catch {}
     return res.status(201).json(normalizeImage(req, toCar(row)));
   }
 );
@@ -273,18 +407,20 @@ router.put(
 
     db.prepare(`UPDATE cars SET name=@name, type=@type, fuel=@fuel, transmission=@transmission, price_per_day=@price_per_day, rating=@rating, seats=@seats, image=@image, city=@city, brand=@brand, description=@description, available=@available, host_id=@host_id WHERE id=${row.id}`).run(updated);
     const out = db.prepare('SELECT * FROM cars WHERE id = ?').get(row.id);
+    try { await mirrorCarToMongo(out); } catch {}
     return res.json(normalizeImage(req, toCar(out)));
   }
 );
 
 // Delete car: allowed for admin or owning host
-router.delete('/:id', requireAuth, (req, res) => {
+router.delete('/:id', requireAuth, async (req, res) => {
   const row = db.prepare('SELECT * FROM cars WHERE id = ?').get(req.params.id);
   if (!row) return res.status(404).json({ error: 'Not found' });
   const isAdmin = req.user?.role === 'admin';
   const isOwner = row.host_id && Number(row.host_id) === Number(req.user.id);
   if (!isAdmin && !isOwner) return res.status(403).json({ error: 'Forbidden' });
   db.prepare('UPDATE cars SET deleted = 1 WHERE id = ?').run(row.id);
+  try { await mirrorCarToMongo({ ...row, deleted: 1 }); } catch {}
   return res.json({ ok: true, softDeleted: true });
 });
 
