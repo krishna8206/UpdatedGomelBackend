@@ -625,9 +625,13 @@ router.post(
         const row = db.prepare('SELECT * FROM cars WHERE id = ?').get(carId);
         
         // Mirror to MongoDB if available
+        console.log('MongoDB URI:', process.env.MONGODB_URI ? 'Set' : 'Not set');
         if (process.env.MONGODB_URI) {
           try {
+            console.log('Attempting to get MongoDB connection...');
             const mdb = await getMongoDb();
+            console.log('MongoDB connection result:', mdb ? 'Success' : 'Failed');
+            
             if (mdb) {
               const carDoc = {
                 sqliteId: carId,
@@ -649,15 +653,28 @@ router.post(
                 deleted: false
               };
               
+              console.log('Saving car to MongoDB:', {
+                collection: 'cars',
+                document: carDoc
+              });
+              
               const result = await mdb.collection('cars').insertOne(carDoc);
               console.log('Car saved to MongoDB:', { 
                 insertedId: result.insertedId,
                 carId,
                 name,
-                hostId: req.user.id 
+                hostId: req.user.id,
+                collection: 'cars',
+                database: mdb.databaseName
               });
+              
+              // Verify the document was saved
+              const savedDoc = await mdb.collection('cars').findOne({ _id: result.insertedId });
+              console.log('Verification - Found document in MongoDB:', savedDoc ? 'Yes' : 'No');
+              
             } else {
               console.warn('MongoDB connection not available during car creation');
+              console.warn('Check if MongoDB is running and MONGODB_URI is correctly set in .env');
             }
           } catch (mongoError) {
             console.error('Error saving car to MongoDB:', {
