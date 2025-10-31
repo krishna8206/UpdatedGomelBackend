@@ -87,6 +87,8 @@ router.get('/', async (req, res) => {
           ])
           .toArray();
 
+        console.log(`Found ${docs.length} cars in MongoDB`);
+        
         const list = docs.map(d => ({
           id: d.sqliteId,
           name: d.name,
@@ -102,15 +104,16 @@ router.get('/', async (req, res) => {
           description: d.description,
           available: !!d.available,
           hostId: d.hostId || null,
-          host: d.host ? {
-            id: d.host.sqliteId,
-            name: d.host.fullName,
-            email: d.host.email,
-            mobile: d.host.mobile
+          host: d.host && d.host.length > 0 ? {
+            id: d.host[0]?.sqliteId || d.hostId,
+            name: d.host[0]?.fullName || '',
+            email: d.host[0]?.email || '',
+            mobile: d.host[0]?.mobile || ''
           } : null,
           createdAt: d.createdAt || null,
         }));
         
+        console.log('Returning cars from MongoDB');
         return res.json(list.map(c => normalizeImage(req, c)));
         
       } catch (mongoError) {
@@ -120,6 +123,7 @@ router.get('/', async (req, res) => {
     }
     
     // Fallback to SQLite if MongoDB is not available or fails
+    console.log('Falling back to SQLite...');
     const rows = db.prepare(`
       SELECT c.*, u.email AS host_email, u.full_name AS host_name, u.mobile AS host_mobile
       FROM cars c
@@ -127,6 +131,8 @@ router.get('/', async (req, res) => {
       WHERE (c.deleted IS NULL OR c.deleted = 0)
       ORDER BY c.id DESC
     `).all();
+    
+    console.log(`Found ${rows.length} cars in SQLite`);
     
     const list = rows.map(row => {
       const car = toCar(row);
@@ -141,6 +147,7 @@ router.get('/', async (req, res) => {
       return car;
     });
     
+    console.log('Returning cars from SQLite');
     return res.json(list.map(c => normalizeImage(req, c)));
     
   } catch (error) {
@@ -203,50 +210,31 @@ router.get('/availability', async (req, res) => {
 
 // Admin: list cars with host details
 router.get('/admin', requireAdmin, async (req, res) => {
-  const mdb = await getMongoDb();
-  if (mdb) {
-    const cars = await mdb
-      .collection('cars')
-      .find({ $or: [ { deleted: { $exists: false } }, { deleted: false } ] })
-      .sort({ sqliteId: -1 })
-      .toArray();
-    const list = [];
-    for (const c of cars) {
-      let host = null;
-      if (c.hostId) host = await mdb.collection('users').findOne({ sqliteId: c.hostId }, { projection: { email: 1, fullName: 1, mobile: 1, sqliteId: 1 } });
-      list.push(normalizeImage(req, {
-        id: c.sqliteId,
-        name: c.name,
-        type: c.type,
-        fuel: c.fuel,
-        transmission: c.transmission,
-        pricePerDay: c.pricePerDay,
-        rating: c.rating,
-        seats: c.seats,
-        image: c.image,
-        city: c.city,
-        brand: c.brand,
-        description: c.description,
-        available: !!c.available,
-        hostId: c.hostId || null,
-        createdAt: c.createdAt || null,
-        host: host ? { id: host.sqliteId, email: host.email, fullName: host.fullName || null, mobile: host.mobile || null } : null,
-        hostEmail: host?.email || null,
-        hostFullName: host?.fullName || null,
-      }));
+  try {
+    const mdb = await getMongoDb();
+    if (mdb) {
+      const cars = await mdb.collection('cars')
+        .find({})
+        .sort({ _id: -1 })
+        .toArray();
+      return res.json(cars.map(c => normalizeImage(req, c)));
     }
-    return res.json(list);
+    // Fallback to SQLite
+    const rows = db.prepare(`
+      SELECT c.*, u.email AS host_email, u.full_name AS host_name, u.mobile AS host_mobile
+      FROM cars c
+      LEFT JOIN users u ON u.id = c.host_id
+      WHERE c.deleted = 0 OR c.deleted IS NULL
+      ORDER BY c.id DESC
+    `).all();
+    return res.json(rows.map(r => normalizeImage(req, toCarWithHost(r))));
+  } catch (error) {
+    console.error('Error in /admin endpoint:', error);
+    return res.status(500).json({ error: 'Failed to fetch admin car list' });
   }
-  const rows = db.prepare(`
-    SELECT c.*, u.email AS host_email, u.full_name AS host_full_name, u.mobile AS host_mobile
-    FROM cars c
-    LEFT JOIN users u ON u.id = c.host_id
-    WHERE (c.deleted IS NULL OR c.deleted = 0)
-    ORDER BY c.id DESC
-  `).all();
 });
 
-// User: get own hosted cars
+// Get cars for the logged-in user
 router.get('/mine', requireAuth, async (req, res) => {
   try {
     console.log('Fetching cars for user:', req.user.id);
@@ -255,18 +243,18 @@ router.get('/mine', requireAuth, async (req, res) => {
     if (mdb) {
       console.log('Using MongoDB to fetch cars');
       try {
-        // First try to get from MongoDB
+        // First try to get from MongoDB with host info
         const docs = await mdb
           .collection('cars')
           .aggregate([
             { 
               $match: { 
-                hostId: req.user.id, 
-                $or: [ 
-                  { deleted: { $exists: false } }, 
-                  { deleted: false } 
-                ] 
-              } 
+                hostId: req.user.id,
+                $or: [
+                  { deleted: { $exists: false } },
+                  { deleted: false }
+                ]
+              }
             },
             {
               $lookup: {
@@ -281,7 +269,7 @@ router.get('/mine', requireAuth, async (req, res) => {
           ])
           .toArray();
 
-        console.log(`Found ${docs.length} cars in MongoDB`);
+        console.log(`Found ${docs.length} cars in MongoDB for user ${req.user.id}`);
         
         const list = docs.map(d => ({
           id: d.sqliteId,
@@ -298,12 +286,6 @@ router.get('/mine', requireAuth, async (req, res) => {
           description: d.description,
           available: !!d.available,
           hostId: d.hostId || null,
-          host: d.host ? {
-            id: d.host.sqliteId,
-            name: d.host.fullName,
-            email: d.host.email,
-            mobile: d.host.mobile
-          } : null,
           createdAt: d.createdAt || null,
         }));
         
@@ -316,18 +298,16 @@ router.get('/mine', requireAuth, async (req, res) => {
     }
     
     // Fallback to SQLite if MongoDB is not available or fails
-    console.log('Using SQLite to fetch cars');
-    const query = `
-      SELECT c.*, u.email as host_email, u.full_name as host_name, u.mobile as host_mobile
+    console.log('Falling back to SQLite for user cars...');
+    const rows = db.prepare(`
+      SELECT c.*, u.email AS host_email, u.full_name AS host_name, u.mobile AS host_mobile
       FROM cars c
-      LEFT JOIN users u ON c.host_id = u.id
-      WHERE (c.deleted IS NULL OR c.deleted = 0) 
-      AND c.host_id = ? 
+      LEFT JOIN users u ON u.id = c.host_id
+      WHERE (c.deleted IS NULL OR c.deleted = 0) AND c.host_id = ?
       ORDER BY c.id DESC
-    `;
+    `).all(req.user.id);
     
-    const rows = db.prepare(query).all(req.user.id);
-    console.log(`Found ${rows.length} cars in SQLite`);
+    console.log(`Found ${rows.length} cars in SQLite for user ${req.user.id}`);
     
     const list = rows.map(row => {
       const car = toCar(row);
@@ -347,7 +327,7 @@ router.get('/mine', requireAuth, async (req, res) => {
   } catch (error) {
     console.error('Error in /mine endpoint:', error);
     return res.status(500).json({ 
-      error: 'Failed to fetch cars',
+      error: 'Failed to fetch your cars',
       message: error.message 
     });
   }
@@ -837,7 +817,15 @@ router.delete('/:id', requireAuth, async (req, res) => {
   const isOwner = row.host_id && Number(row.host_id) === Number(req.user.id);
   if (!isAdmin && !isOwner) return res.status(403).json({ error: 'Forbidden' });
   db.prepare('UPDATE cars SET deleted = 1 WHERE id = ?').run(row.id);
-  try { await mirrorCarToMongo({ ...row, deleted: 1 }); } catch {}
+  try { 
+    await mirrorCarToMongo({ ...row, deleted: 1 }); 
+  } catch (error) {
+    console.error('Error deleting car:', error);
+    return res.status(500).json({ 
+      error: 'Failed to delete car',
+      message: error.message 
+    });
+  }
   return res.json({ ok: true, softDeleted: true });
 });
 
