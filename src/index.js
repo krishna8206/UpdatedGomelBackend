@@ -44,6 +44,14 @@ app.get('/api/events', sseHandler);
 
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
+// Debug 404 handler
+app.use('/api/*', (req, res, next) => {
+  console.log('404 - Route not found:', req.originalUrl);
+  console.log('Method:', req.method);
+  console.log('Headers:', req.headers);
+  res.status(404).json({ error: 'Route not found', path: req.originalUrl });
+});
+
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`Gomel Cars backend running on http://localhost:${PORT}`);

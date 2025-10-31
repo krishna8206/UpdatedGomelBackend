@@ -72,6 +72,13 @@ router.post(
     body('email').isEmail().normalizeEmail(),
     body('purpose').isIn(['login', 'signup', 'reset']).withMessage('Invalid purpose')
   ],
+  // Debug middleware
+  (req, res, next) => {
+    console.log('Request received at /request-otp');
+    console.log('Request body:', req.body);
+    console.log('Request headers:', req.headers);
+    next();
+  },
   async (req, res) => {
     try {
       const errors = validationResult(req);
