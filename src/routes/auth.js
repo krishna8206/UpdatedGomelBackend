@@ -41,10 +41,27 @@ router.post(
 
     const code = String(Math.floor(100000 + Math.random() * 900000));
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
-    db.prepare('INSERT INTO otp_codes (email, code, purpose, expires_at) VALUES (?, ?, ?, ?)')
+    
+    // Store OTP in database
+    db.prepare('INSERT OR REPLACE INTO otp_codes (email, code, purpose, expires_at) VALUES (?, ?, ?, ?)')
       .run(normEmail, code, 'login', expiresAt);
 
-    try { await sendOtpEmail({ to: normEmail, code, purpose: 'login' }); } catch {}
+    // Send OTP via email
+    const emailResult = await sendOtpEmail({ to: normEmail, code, purpose: 'login' });
+    
+    // In development or when email is not enabled, include the OTP in the response
+    if (process.env.NODE_ENV !== 'production' || !emailResult.sent) {
+      return res.json({ 
+        pendingOtp: true, 
+        expiresAt,
+        debug: { 
+          code,
+          emailSent: emailResult.sent,
+          reason: emailResult.reason 
+        }
+      });
+    }
+    
     return res.json({ pendingOtp: true, expiresAt });
   }
 ); // <-- make sure this closing parenthesis + semicolon exists
