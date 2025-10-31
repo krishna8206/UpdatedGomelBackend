@@ -613,6 +613,19 @@ router.post(
             console.log('MongoDB connection result:', mdb ? 'Success' : 'Failed');
             
             if (mdb) {
+              // First, check if we have the user in MongoDB
+              const userInMongo = await mdb.collection('users').findOne({ sqliteId: req.user.id });
+              
+              if (!userInMongo) {
+                console.log('User not found in MongoDB, trying to mirror...');
+                // Try to mirror the user to MongoDB
+                const userInSqlite = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+                if (userInSqlite) {
+                  await mirrorUserToMongo(userInSqlite);
+                  console.log('User mirrored to MongoDB');
+                }
+              }
+              
               const carDoc = {
                 sqliteId: carId,
                 name: name || null,
@@ -633,24 +646,29 @@ router.post(
                 deleted: false
               };
               
-              console.log('Saving car to MongoDB:', {
-                collection: 'cars',
-                document: carDoc
-              });
+              console.log('Saving car to MongoDB:', JSON.stringify(carDoc, null, 2));
               
-              const result = await mdb.collection('cars').insertOne(carDoc);
-              console.log('Car saved to MongoDB:', { 
-                insertedId: result.insertedId,
-                carId,
-                name,
-                hostId: req.user.id,
-                collection: 'cars',
-                database: mdb.databaseName
+              // Use updateOne with upsert to ensure we don't get duplicate entries
+              const result = await mdb.collection('cars').updateOne(
+                { sqliteId: carId },
+                { $set: carDoc },
+                { upsert: true }
+              );
+              
+              console.log('MongoDB update result:', {
+                matchedCount: result.matchedCount,
+                modifiedCount: result.modifiedCount,
+                upsertedCount: result.upsertedCount,
+                upsertedId: result.upsertedId
               });
               
               // Verify the document was saved
-              const savedDoc = await mdb.collection('cars').findOne({ _id: result.insertedId });
-              console.log('Verification - Found document in MongoDB:', savedDoc ? 'Yes' : 'No');
+              const savedDoc = await mdb.collection('cars').findOne({ sqliteId: carId });
+              if (savedDoc) {
+                console.log('Car successfully saved to MongoDB with _id:', savedDoc._id);
+              } else {
+                console.error('Failed to verify car in MongoDB after save');
+              }
               
             } else {
               console.warn('MongoDB connection not available during car creation');

@@ -65,10 +65,80 @@ function genOtp() {
   return String(Math.floor(1000 + Math.random() * 9000));
 }
 
+// Request OTP for login/signup
 router.post(
   '/request-otp',
-  body('email').isEmail(),
-  body('purpose').isIn(['login', 'signup', 'reset']),
+  [
+    body('email').isEmail().normalizeEmail(),
+    body('purpose').isIn(['login', 'signup', 'reset']).withMessage('Invalid purpose')
+  ],
+  async (req, res) => {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({ errors: errors.array() });
+      }
+
+      const { email, purpose } = req.body;
+      const normEmail = String(email).trim().toLowerCase();
+      
+      // For login purpose, check if user exists
+      if (purpose === 'login') {
+        const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(normEmail);
+        const existsInMongo = await mongoUserExists(normEmail).catch(() => false);
+        console.log('[auth][request-otp] purpose=login email=', normEmail, 'sqlite=', !!existing, 'mongo=', existsInMongo);
+        if (!existing && !existsInMongo) {
+          return res.status(404).json({ error: 'Email not registered. Please sign up first.' });
+        }
+      }
+      
+      // For signup, check if email is already registered
+      if (purpose === 'signup') {
+        const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(normEmail);
+        if (existing) {
+          return res.status(400).json({ error: 'Email already registered' });
+        }
+      }
+
+      // Generate and save OTP
+      const code = String(Math.floor(100000 + Math.random() * 900000));
+      const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes expiry
+      
+      // Delete any existing OTPs for this email and purpose
+      db.prepare('DELETE FROM otp_codes WHERE email = ? AND purpose = ?')
+        .run(normEmail, purpose);
+      
+      // Insert new OTP
+      db.prepare('INSERT INTO otp_codes (email, code, purpose, expires_at) VALUES (?, ?, ?, ?)')
+        .run(normEmail, code, purpose, expiresAt.toISOString());
+
+      // Log the OTP for development (remove in production)
+      console.log(`OTP for ${normEmail} (${purpose}): ${code}`);
+      
+      // In production, you would send the OTP via email/SMS here
+      // await sendOtpEmail({ to: normEmail, code, purpose });
+      
+      return res.json({
+        success: true,
+        message: 'OTP sent successfully',
+        expiresAt: expiresAt.toISOString()
+      });
+      
+    } catch (error) {
+      console.error('Error in request-otp:', error);
+      return res.status(500).json({ error: 'Failed to process OTP request' });
+    }
+  }
+);
+
+// Verify OTP
+router.post(
+  '/verify-otp',
+  [
+    body('email').isEmail().normalizeEmail(),
+    body('code').isLength({ min: 6, max: 6 }).withMessage('OTP must be 6 digits'),
+    body('purpose').isIn(['login', 'signup', 'reset']).withMessage('Invalid purpose')
+  ],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
